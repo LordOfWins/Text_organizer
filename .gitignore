@@ -137,4 +137,9 @@ backup_*/
 *.exe
 *.ico
 guidelines_backup/
-restore_guidelines.bat 
+restore_guidelines.bat
+
+# Cursor rules and documentation
+.cursor/rules/
+*.md
+guidelines_backup_*.json 

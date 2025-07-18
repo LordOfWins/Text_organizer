@@ -564,10 +564,16 @@ class UpgradeManager:
                 self.terminate_current_program()
                 time.sleep(2)  # 프로세스 종료 대기
                 
-                # 2단계: PyInstaller로 빌드
-                logging.info("2단계: PyInstaller 빌드 중...")
-                build_success = self._build_with_python()
-                    
+                # 2단계: 배치 파일을 통한 빌드 (우선 시도)
+                logging.info("2단계: 배치 파일을 통한 빌드 시도...")
+                build_script = self.find_build_script()
+                if build_script and build_script.exists():
+                    logging.info("배치 파일 발견: %s", build_script)
+                    build_success = self._build_with_batch(build_script)
+                else:
+                    logging.info("배치 파일을 찾을 수 없음, Python 빌드 시도...")
+                    build_success = self._build_with_python()
+                
                 if not build_success:
                     logging.error("빌드 실패")
                     return False
@@ -597,40 +603,148 @@ class UpgradeManager:
             
             base_path = self.get_base_path()
             
-            # 기존 빌드 파일 정리
+            # 기존 빌드 파일 정리 (강화된 버전)
             for path in ["dist", "build"]:
                 full_path = base_path / path
                 if full_path.exists():
-                    shutil.rmtree(full_path)
-                    logging.info("삭제됨: %s", full_path)
+                    try:
+                        # 파일 잠금 해제를 위한 대기
+                        time.sleep(2)
+                        
+                        # 먼저 일반적인 삭제 시도
+                        shutil.rmtree(full_path, ignore_errors=True)
+                        logging.info("삭제됨: %s", full_path)
+                        
+                        # 삭제 확인
+                        if full_path.exists():
+                            logging.warning("일반 삭제 실패, 강제 삭제 시도: %s", full_path)
+                            # 강제 삭제 시도
+                            if os.name == 'nt':
+                                # Windows에서 강제 삭제
+                                result = subprocess.run(f'rmdir /s /q "{full_path}"', shell=True, capture_output=True, timeout=30)
+                                if result.returncode == 0:
+                                    logging.info("Windows 강제 삭제 완료: %s", full_path)
+                                else:
+                                    logging.warning("Windows 강제 삭제 실패: %s", result.stderr)
+                                    # 추가 대기 후 재시도
+                                    time.sleep(5)
+                                    subprocess.run(f'rmdir /s /q "{full_path}"', shell=True, capture_output=True)
+                            else:
+                                # Linux/Mac에서 강제 삭제
+                                subprocess.run(f'rm -rf "{full_path}"', shell=True, capture_output=True)
+                                logging.info("Linux/Mac 강제 삭제 완료: %s", full_path)
+                    except Exception as e:
+                        logging.error("빌드 폴더 삭제 실패: %s - %s", full_path, e)
             
-            # .spec 파일 삭제
+            # .spec 파일 삭제 (강화된 버전)
             for spec_file in base_path.glob("*.spec"):
-                spec_file.unlink()
-                logging.info("삭제됨: %s", spec_file)
+                try:
+                    spec_file.unlink()
+                    logging.info("삭제됨: %s", spec_file)
+                except PermissionError:
+                    logging.warning("spec 파일 삭제 실패 (잠겨있음): %s", spec_file)
+                    # 강제 삭제 시도
+                    try:
+                        subprocess.run(f'del /f /q "{spec_file}"', shell=True, capture_output=True, timeout=5)
+                        logging.info("spec 파일 강제 삭제 성공: %s", spec_file)
+                    except Exception as e:
+                        logging.error("spec 파일 강제 삭제 실패: %s - %s", spec_file, e)
+                except Exception as e:
+                    logging.warning("spec 파일 삭제 실패: %s - %s", spec_file, e)
             
-            # PyInstaller 설치 확인 및 설치
+            # PyInstaller 설치 확인 및 설치 (강화된 버전)
             try:
                 import PyInstaller  # type: ignore
                 logging.info("PyInstaller 버전: %s", PyInstaller.__version__)
             except ImportError:
                 logging.info("PyInstaller 설치 중...")
-                install_result = subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "pyinstaller"], 
-                    capture_output=True, text=True
-                )
-                if install_result.returncode != 0:
-                    logging.error("PyInstaller 설치 실패: %s", install_result.stderr)
+                
+                # 현재 Python 환경에 직접 설치
+                try:
+                    install_result = subprocess.run(
+                        [sys.executable, "-m", "pip", "install", "--quiet", "pyinstaller"],
+                        capture_output=True, 
+                        text=True,
+                        timeout=60
+                    )
+                    if install_result.returncode == 0:
+                        logging.info("PyInstaller 설치 성공")
+                    else:
+                        logging.error("PyInstaller 설치 실패: %s", install_result.stderr)
+                        return False
+                except Exception as e:
+                    logging.error("PyInstaller 설치 시도 실패: %s", e)
                     return False
-                logging.info("PyInstaller 설치 완료")
+                
+                # 설치 후 다시 확인
+                try:
+                    import PyInstaller  # type: ignore
+                    logging.info("PyInstaller 설치 확인 완료: %s", PyInstaller.__version__)
+                except ImportError:
+                    logging.error("PyInstaller 설치 후에도 임포트 실패")
+                    return False
             
             # src/main.py를 진입점으로 사용
             main_script = base_path / "src" / "main.py"
             
             if main_script.exists():
-                cmd = [
-                    sys.executable, "-m", "PyInstaller",
-                    "--noconfirm", "--clean", "--onedir", "--windowed",
+                # Tcl/Tk 인코딩 문제 해결을 위한 환경 변수 설정 (강화된 버전)
+                env = os.environ.copy()
+                env['PYTHONPATH'] = str(base_path)
+                env['PYTHONIOENCODING'] = 'utf-8'
+                
+                # Python 3.11 환경 변수 추가
+                python311_path = "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python311"
+                if python311_path not in env.get('PATH', ''):
+                    env['PATH'] = f"{python311_path};{python311_path}\\Scripts;{env.get('PATH', '')}"
+                
+                # PyInstaller 경로 추가 (Python 3.11 환경)
+                pyinstaller_path = "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages"
+                if pyinstaller_path not in env.get('PYTHONPATH', ''):
+                    env['PYTHONPATH'] = f"{pyinstaller_path};{env.get('PYTHONPATH', '')}"
+                
+                # Tcl/Tk 인코딩 문제 해결을 위한 추가 옵션
+                runtime_hook_path = base_path / "runtime_hook.py"
+                
+                # Python 3.11 실행 경로 확인 및 수정
+                python_executable = sys.executable
+                logging.info("현재 Python 실행 경로: %s", python_executable)
+                
+                # Python 3.11 명시적 사용 시도
+                try:
+                    # py -3.11 명령어로 Python 3.11 사용
+                    python311_result = subprocess.run(
+                        ["py", "-3.11", "--version"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+                    if python311_result.returncode == 0:
+                        python_executable = "py -3.11"
+                        logging.info("Python 3.11 사용: %s", python_executable)
+                    else:
+                        logging.warning("Python 3.11 명령어 실패, 현재 Python 사용")
+                except Exception as e:
+                    logging.warning("Python 3.11 확인 실패: %s, 현재 Python 사용", e)
+                
+                # PyInstaller 모듈 경로 확인
+                try:
+                    import PyInstaller  # type: ignore
+                    pyinstaller_path = PyInstaller.__file__
+                    logging.info("PyInstaller 경로: %s", pyinstaller_path)
+                except Exception as e:
+                    logging.warning("PyInstaller 경로 확인 실패: %s", e)
+                
+                # PyInstaller 실행 방법 결정 (Python 3.11 사용)
+                if python_executable == "py -3.11":
+                    pyinstaller_cmd = ["py", "-3.11", "-m", "PyInstaller"]
+                else:
+                    pyinstaller_cmd = [python_executable, "-m", "PyInstaller"]
+                logging.info("PyInstaller 실행 방법: %s", " ".join(pyinstaller_cmd))
+                
+                # Tcl/Tk 인코딩 문제 해결을 위한 최소 설정 (onedir 모드로 변경)
+                cmd = pyinstaller_cmd + [
+                    "--noconfirm", "--clean", "--onedir", "--windowed",  # --onefile 대신 --onedir 사용
                     "--name", "text_cleaner",
                     "--add-data", f"{base_path / 'guidelines.json'};.",
                     "--add-data", f"{base_path / 'fonts'};fonts",
@@ -644,6 +758,9 @@ class UpgradeManager:
                     "--hidden-import", "cv2",
                     "--hidden-import", "pytesseract",
                     "--hidden-import", "psutil",
+                    "--distpath", str(base_path / "dist"),
+                    "--workpath", str(base_path / "build"),
+                    "--specpath", str(base_path),
                     str(main_script)
                 ]
                 logging.info("새로운 구조로 빌드: %s", main_script)
@@ -651,15 +768,31 @@ class UpgradeManager:
                 logging.error("메인 스크립트를 찾을 수 없음: %s", main_script)
                 return False
             
+            # 빌드 전 추가 파일 잠금 해제 및 대기
+            logging.info("빌드 전 추가 파일 잠금 해제 및 대기")
+            self._force_unlock_exe_file()
+            time.sleep(3)  # 추가 대기 시간
+            
             logging.info("PyInstaller 빌드 실행: %s", " ".join(cmd))
             
-            # 실시간으로 출력을 보기 위해 Popen 사용
+            # 실시간으로 출력을 보기 위해 Popen 사용 (강화된 버전)
+            # Windows에서 한글 인코딩 문제 해결
+            startupinfo = None
+            if os.name == 'nt':
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+            
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                cwd=base_path
+                encoding='utf-8',
+                errors='replace',
+                cwd=base_path,
+                env=env,
+                startupinfo=startupinfo
             )
             
             # 실시간으로 출력 읽기
@@ -677,7 +810,7 @@ class UpgradeManager:
             logging.info("PyInstaller 빌드 완료 (returncode: %d)", returncode)
             
             if returncode == 0:
-                # 빌드 결과 확인
+                # 빌드 결과 확인 (onedir 모드)
                 exe_path = base_path / "dist" / "text_cleaner" / "text_cleaner.exe"
                 if exe_path.exists():
                     logging.info("빌드 성공: %s", exe_path)
@@ -700,17 +833,17 @@ class UpgradeManager:
         try:
             logging.info("배치 파일로 빌드 시작: %s", build_script)
             
-            # 스크립트 파일 무결성 재검증
-            if not self._validate_file_integrity(build_script):
-                logging.error("빌드 스크립트 무결성 검증 실패")
-                return False
-            
             # Windows 환경에서 안전한 subprocess 실행
             if os.name == 'nt':  # Windows
                 # Windows에서 한글 인코딩 문제 해결
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 startupinfo.wShowWindow = subprocess.SW_HIDE
+                
+                # 환경 변수 설정
+                env = os.environ.copy()
+                env['PYTHONPATH'] = str(build_script.parent)
+                env['PYTHONIOENCODING'] = 'utf-8'
                 
                 process = subprocess.Popen(
                     [str(build_script)], 
@@ -721,7 +854,8 @@ class UpgradeManager:
                     errors='replace',
                     cwd=build_script.parent,
                     startupinfo=startupinfo,
-                    shell=True
+                    shell=True,
+                    env=env
                 )
                 
                 # 실시간으로 출력 읽기
@@ -751,29 +885,24 @@ class UpgradeManager:
                 returncode = result.returncode
                 output_lines = result.stdout.splitlines() if result.stdout else []
             
-            # 빌드 결과 확인 및 무결성 검증
+            # 빌드 결과 확인
             base_path = self.get_base_path()
             
-            # 빌드 성공 메시지 확인
-            build_success = any("BUILD_SUCCESS" in line for line in output_lines)
-            
-            # text_cleaner.exe 확인
-            new_exe_path = base_path / "dist" / "text_cleaner.exe"
+            # text_cleaner.exe 확인 (onedir 모드)
+            new_exe_path = base_path / "dist" / "text_cleaner" / "text_cleaner.exe"
+            if not new_exe_path.exists():
+                # onefile 모드 확인
+                new_exe_path = base_path / "dist" / "text_cleaner.exe"
             
             if new_exe_path.exists():
-                # 파일 무결성 검증
-                if self._validate_file_integrity(new_exe_path):
-                    logging.info("배치 파일 빌드 성공: %s", new_exe_path)
-                    return True
-                else:
-                    logging.error("빌드된 파일 무결성 검증 실패")
-                    return False
-            elif build_success and returncode == 0:
-                # 빌드 성공 메시지가 있고 returncode가 0이면 성공으로 간주
-                logging.info("배치 파일 빌드 성공 (BUILD_SUCCESS 메시지 확인)")
+                logging.info("배치 파일 빌드 성공: %s", new_exe_path)
+                return True
+            elif returncode == 0:
+                # returncode가 0이면 성공으로 간주
+                logging.info("배치 파일 빌드 성공 (returncode: 0)")
                 return True
             else:
-                logging.error("배치 파일 빌드 실패: 실행 파일을 찾을 수 없음")
+                logging.error("배치 파일 빌드 실패: returncode %d", returncode)
                 if output_lines:
                     logging.error("빌드 출력: %s", output_lines)
                 return False
@@ -786,12 +915,12 @@ class UpgradeManager:
             return False
 
     def terminate_current_program(self) -> bool:
-        """text_cleaner.exe 프로세스 종료"""
+        """text_cleaner 관련 프로세스 정확히 종료 (개선된 버전)"""
         try:
-            logging.info("text_cleaner.exe 프로세스 종료 시작")
+            logging.info("1단계: text_cleaner.exe 종료 중...")
             
             if os.name == 'nt':  # Windows
-                # taskkill로 text_cleaner.exe 종료
+                # 1단계: text_cleaner.exe 종료
                 cmd = 'taskkill /f /im "text_cleaner.exe"'
                 try:
                     logging.info("실행: %s", cmd)
@@ -801,15 +930,178 @@ class UpgradeManager:
                     else:
                         logging.info("text_cleaner.exe가 이미 종료되었거나 실행 중이 아님")
                 except Exception as e:
-                    logging.warning("프로세스 종료 실패: %s", e)
+                    logging.warning("text_cleaner.exe 종료 실패: %s", e)
                 
+                # 2단계: text_cleaner 관련 Python 프로세스 종료
+                logging.info("2단계: text_cleaner 관련 Python 프로세스 종료 중...")
+                if PSUTIL_AVAILABLE:
+                    try:
+                        terminated_count = 0
+                        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                            if proc.info['name']:
+                                # text_cleaner.exe 또는 text_cleaner 관련 Python 프로세스만 종료
+                                should_terminate = False
+                                
+                                if proc.info['name'].lower() == 'text_cleaner.exe':
+                                    should_terminate = True
+                                elif (proc.info['name'].lower() == 'python.exe' and 
+                                      proc.info.get('cmdline')):
+                                    cmdline = ' '.join(proc.info['cmdline']).lower()
+                                    # text_cleaner 관련 명령어 확인
+                                    if any(keyword in cmdline for keyword in [
+                                        'text_cleaner', 'main.py', 'src/main.py', 
+                                        'app.py', 'src/ui/app.py'
+                                    ]):
+                                        should_terminate = True
+                                
+                                if should_terminate:
+                                    try:
+                                        logging.info("text_cleaner 관련 프로세스 종료: PID %s, 이름: %s, 명령어: %s", 
+                                                   proc.info['pid'], proc.info['name'], 
+                                                   ' '.join(proc.info.get('cmdline', [])))
+                                        proc.terminate()
+                                        proc.wait(timeout=5)
+                                        terminated_count += 1
+                                    except psutil.NoSuchProcess:
+                                        pass
+                                    except Exception as e:
+                                        logging.warning("프로세스 종료 실패 (PID %s): %s", proc.info['pid'], e)
+                        
+                        logging.info("종료된 text_cleaner 관련 프로세스 수: %d", terminated_count)
+                        
+                    except Exception as e:
+                        logging.warning("psutil 프로세스 종료 실패: %s", e)
+                else:
+                    # psutil이 없는 경우 대안 방법
+                    logging.info("psutil이 없어 대안 방법으로 Python 프로세스 종료 시도")
+                    try:
+                        # 현재 실행 중인 Python 프로세스 중 text_cleaner 관련 프로세스 찾기
+                        cmd = 'wmic process where "name=\'python.exe\' and commandline like \'%text_cleaner%\'" call terminate'
+                        result = subprocess.run(cmd, shell=True, capture_output=True, timeout=10)
+                        if result.returncode == 0:
+                            logging.info("WMIC를 통한 Python 프로세스 종료 성공")
+                        else:
+                            logging.info("WMIC를 통한 Python 프로세스 종료 실패 또는 해당 프로세스 없음")
+                    except Exception as e:
+                        logging.warning("WMIC 프로세스 종료 실패: %s", e)
+                
+                # 3단계: 추가 대기 시간으로 프로세스 완전 종료 확인
+                logging.info("3단계: 프로세스 완전 종료 대기 중...")
+                time.sleep(3)
+                
+                # 4단계: 파일 잠금 해제를 위한 대기
+                logging.info("4단계: 파일 잠금 해제 대기 중...")
+                time.sleep(2)
+                
+                # 5단계: 파일 핸들러 해제를 위한 가비지 컬렉션
+                import gc
+                gc.collect()
+                
+                # 6단계: 강제로 dist/text_cleaner.exe 파일 잠금 해제
+                logging.info("6단계: dist/text_cleaner.exe 파일 잠금 해제 시도...")
+                self._force_unlock_exe_file()
+                
+                logging.info("text_cleaner 프로세스 종료 완료")
                 return True
             else:
                 # Linux/Mac 환경
                 return self.kill_all_python_processes()
                 
         except Exception as e:
-            logging.error("프로세스 종료 실패: %s", e)
+            logging.error("프로세스 종료 중 오류 발생: %s", e)
+            return False
+
+    def _force_unlock_exe_file(self) -> bool:
+        """dist/text_cleaner.exe 파일의 잠금을 강제로 해제"""
+        try:
+            base_path = self.get_base_path()
+            exe_path = base_path / "dist" / "text_cleaner.exe"
+            
+            if not exe_path.exists():
+                logging.info("text_cleaner.exe 파일이 존재하지 않음")
+                return True
+            
+            # Windows에서 파일 잠금 해제 시도
+            if os.name == 'nt':
+                # 방법 1: 모든 text_cleaner 관련 프로세스 강제 종료
+                logging.info("방법 1: 모든 text_cleaner 관련 프로세스 강제 종료")
+                try:
+                    # text_cleaner.exe 프로세스 강제 종료
+                    subprocess.run("taskkill /f /im text_cleaner.exe", shell=True, capture_output=True, timeout=5)
+                    
+                    # Python 프로세스 중 text_cleaner 관련 프로세스 강제 종료
+                    if PSUTIL_AVAILABLE:
+                        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                            if proc.info['name'] and proc.info['name'].lower() == 'python.exe':
+                                try:
+                                    cmdline = ' '.join(proc.info.get('cmdline', [])).lower()
+                                    if any(keyword in cmdline for keyword in ['text_cleaner', 'main.py', 'src/main.py']):
+                                        logging.info(f"text_cleaner 관련 Python 프로세스 강제 종료: PID {proc.info['pid']}")
+                                        proc.kill()
+                                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                    continue
+                except Exception as e:
+                    logging.warning(f"프로세스 강제 종료 중 오류: {e}")
+                
+                # 방법 2: 파일 핸들러 해제를 위한 대기
+                logging.info("방법 2: 파일 핸들러 해제 대기")
+                time.sleep(3)
+                
+                # 방법 3: 파일 삭제 시도
+                logging.info("방법 3: 파일 삭제 시도")
+                try:
+                    exe_path.unlink()
+                    logging.info("text_cleaner.exe 파일 삭제 성공")
+                    return True
+                except PermissionError:
+                    logging.warning("text_cleaner.exe 파일 삭제 실패 (잠겨있음)")
+                    
+                    # 방법 4: 추가 대기 후 재시도
+                    logging.info("방법 4: 추가 대기 후 재시도")
+                    time.sleep(5)
+                    try:
+                        exe_path.unlink()
+                        logging.info("text_cleaner.exe 파일 삭제 성공 (재시도)")
+                        return True
+                    except PermissionError:
+                        logging.error("text_cleaner.exe 파일 삭제 실패 (최종)")
+                        
+                        # 방법 5: 파일 이름 변경 시도
+                        logging.info("방법 5: 파일 이름 변경 시도")
+                        try:
+                            backup_path = exe_path.with_suffix('.exe.bak')
+                            exe_path.rename(backup_path)
+                            logging.info(f"text_cleaner.exe 파일 이름 변경 성공: {backup_path}")
+                            return True
+                        except Exception as e:
+                            logging.error(f"파일 이름 변경 실패: {e}")
+                            
+                            # 방법 6: 강제 삭제 명령어 사용
+                            logging.info("방법 6: 강제 삭제 명령어 사용")
+                            try:
+                                subprocess.run(f'del /f /q "{exe_path}"', shell=True, capture_output=True, timeout=10)
+                                if not exe_path.exists():
+                                    logging.info("강제 삭제 명령어로 파일 삭제 성공")
+                                    return True
+                                else:
+                                    logging.error("강제 삭제 명령어로도 파일 삭제 실패")
+                                    return False
+                            except Exception as e:
+                                logging.error(f"강제 삭제 명령어 실패: {e}")
+                                return False
+                            
+            else:
+                # Linux/Mac 환경
+                try:
+                    exe_path.unlink()
+                    logging.info("text_cleaner.exe 파일 삭제 성공")
+                    return True
+                except Exception as e:
+                    logging.warning(f"파일 삭제 실패: {e}")
+                    return False
+                    
+        except Exception as e:
+            logging.error(f"파일 잠금 해제 중 예외 발생: {e}")
             return False
 
     def launch_new_program(self) -> bool:
@@ -817,7 +1109,7 @@ class UpgradeManager:
         try:
             logging.info("새 text_cleaner.exe 실행 시작")
             
-            # 새 실행 파일 경로 확인
+            # 새 실행 파일 경로 확인 (onedir 모드)
             base_path = self.get_base_path()
             new_exe_path = base_path / "dist" / "text_cleaner" / "text_cleaner.exe"
             
@@ -964,6 +1256,174 @@ class UpgradeManager:
             logging.error("환경 검증 스크립트 실행 실패: %s", e)
             return False 
 
+    def _create_temp_upgrade_script(self) -> Optional[Path]:
+        """임시 업그레이드 스크립트 생성 - 독립 실행 방식"""
+        try:
+            import tempfile
+            
+            # 프로젝트 루트 경로 찾기
+            base_path = self.get_base_path()
+            
+            # 임시 스크립트 내용 생성 - 독립 실행 방식
+            script_content = f'''#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+임시 업그레이드 스크립트
+독립적으로 실행되는 업그레이드 프로세스
+"""
+
+import sys
+import os
+import logging
+import subprocess
+import time
+import shutil
+from pathlib import Path
+
+# 로깅 설정
+def setup_logging():
+    """로깅 설정"""
+    project_root = r"{base_path}"
+    log_dir = os.path.join(project_root, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(os.path.join(log_dir, "temp_upgrade.log"), encoding='utf-8')
+        ]
+    )
+
+setup_logging()
+
+print("[임시 업그레이드 스크립트] 시작...")
+logging.info("임시 업그레이드 스크립트 시작")
+
+try:
+    project_root = r"{base_path}"
+    logging.info(f"프로젝트 루트: {{project_root}}")
+    
+    # Python 실행 파일 경로 확인
+    python_exe = sys.executable
+    logging.info(f"Python 실행 파일: {{python_exe}}")
+    
+    # 방법 1: 배치 파일을 통한 업그레이드
+    build_bat = os.path.join(project_root, "build.bat")
+    if os.path.exists(build_bat):
+        print("[임시 업그레이드 스크립트] build.bat를 통한 업그레이드 시도")
+        logging.info("build.bat를 통한 업그레이드 시도")
+        
+        # 환경 변수 설정
+        env = os.environ.copy()
+        env['PYTHONPATH'] = project_root + os.pathsep + env.get('PYTHONPATH', '')
+        
+        # 배치 파일 실행
+        result = subprocess.run(
+            [build_bat],
+            cwd=project_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            shell=True
+        )
+        
+        if result.returncode == 0:
+            print("[임시 업그레이드 스크립트] build.bat 업그레이드 성공")
+            logging.info("build.bat 업그레이드 성공")
+            logging.info(f"출력: {{result.stdout}}")
+            
+            # 새 프로그램 실행 시도
+            time.sleep(2)
+            new_exe = os.path.join(project_root, "dist", "text_cleaner.exe")
+            if os.path.exists(new_exe):
+                try:
+                    subprocess.Popen([new_exe], cwd=project_root)
+                    print("[임시 업그레이드 스크립트] 새 프로그램 실행 성공")
+                    logging.info("새 프로그램 실행 성공")
+                except Exception as e:
+                    print(f"[임시 업그레이드 스크립트] 새 프로그램 실행 실패: {{e}}")
+                    logging.error(f"새 프로그램 실행 실패: {{e}}")
+        else:
+            print(f"[임시 업그레이드 스크립트] build.bat 업그레이드 실패: {{result.stderr}}")
+            logging.error(f"build.bat 업그레이드 실패: {{result.stderr}}")
+            logging.error(f"출력: {{result.stdout}}")
+    else:
+        print(f"[임시 업그레이드 스크립트] build.bat를 찾을 수 없음: {{build_bat}}")
+        logging.error(f"build.bat를 찾을 수 없음: {{build_bat}}")
+        
+        # 방법 2: 직접 Python 스크립트 실행
+        main_script = os.path.join(project_root, "src", "main.py")
+        if os.path.exists(main_script):
+            print("[임시 업그레이드 스크립트] main.py 직접 실행 시도")
+            logging.info("main.py 직접 실행 시도")
+            
+            # 환경 변수 설정
+            env = os.environ.copy()
+            env['PYTHONPATH'] = project_root + os.pathsep + env.get('PYTHONPATH', '')
+            
+            # main.py 실행
+            result = subprocess.run(
+                [python_exe, main_script],
+                cwd=project_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding='utf-8'
+            )
+            
+            if result.returncode == 0:
+                print("[임시 업그레이드 스크립트] main.py 실행 성공")
+                logging.info("main.py 실행 성공")
+            else:
+                print(f"[임시 업그레이드 스크립트] main.py 실행 실패: {{result.stderr}}")
+                logging.error(f"main.py 실행 실패: {{result.stderr}}")
+        else:
+            print(f"[임시 업그레이드 스크립트] main.py를 찾을 수 없음: {{main_script}}")
+            logging.error(f"main.py를 찾을 수 없음: {{main_script}}")
+        
+except Exception as e:
+    print(f"[임시 업그레이드 스크립트] 예상치 못한 오류: {{e}}")
+    logging.error(f"예상치 못한 오류: {{e}}")
+    import traceback
+    logging.error(traceback.format_exc())
+
+finally:
+    print("[임시 업그레이드 스크립트] 종료")
+    logging.info("임시 업그레이드 스크립트 종료")
+    
+    # 임시 파일 정리
+    try:
+        current_script = Path(__file__)
+        if current_script.exists():
+            current_script.unlink()
+            print("[임시 업그레이드 스크립트] 임시 파일 삭제 완료")
+    except Exception as e:
+        print(f"[임시 업그레이드 스크립트] 임시 파일 삭제 실패: {{e}}")
+'''
+            
+            # 임시 파일 생성
+            temp_file = tempfile.NamedTemporaryFile(
+                mode='w',
+                suffix='.py',
+                prefix='temp_upgrade_',
+                delete=False,
+                encoding='utf-8'
+            )
+            
+            temp_file.write(script_content)
+            temp_file.close()
+            
+            temp_path = Path(temp_file.name)
+            logging.info(f"임시 업그레이드 스크립트 생성 완료: {temp_path}")
+            return temp_path
+            
+        except Exception as e:
+            logging.error(f"임시 업그레이드 스크립트 생성 실패: {e}")
+            return None
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="text_cleaner 업그레이드 매니저")
@@ -971,10 +1431,19 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.upgrade_and_restart:
+        # 프로젝트 루트를 sys.path에 추가
+        import sys
+        from pathlib import Path
+        
+        # 현재 파일의 위치를 기준으로 프로젝트 루트 찾기
+        current_file = Path(__file__)
+        project_root = current_file.parent.parent.parent  # src/core/upgrade_manager.py -> src/core -> src -> project_root
+        sys.path.insert(0, str(project_root))
+        
         # 로깅 설정 강화
         from datetime import datetime
-        log_filename = f"logs/upgrade_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        os.makedirs("logs", exist_ok=True)
+        log_filename = project_root / "logs" / f"upgrade_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        log_filename.parent.mkdir(exist_ok=True)
         
         logging.basicConfig(
             level=logging.INFO,

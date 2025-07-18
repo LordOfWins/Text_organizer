@@ -510,12 +510,19 @@ class TextCleanerApp:
                 log_user_action("Clean Text", "Input validation failed", False)
                 return
                 
-            # 사용자 액션 로깅
+            # 빈 텍스트 처리
             text_length: int = len(input_content.strip())
-            log_user_action("Clean Text", f"Text length: {text_length} characters, Guideline: {self.current_guideline}")
-            
-            # 스레드에서 처리
-            self._start_processing_thread(input_content)
+            if text_length == 0:
+                logging.info("Empty text input detected")
+                log_user_action("Clean Text", "Empty text input", True)
+                # 빈 텍스트의 경우에도 처리 진행 (가이드라인 정보만 표시)
+                self._start_processing_thread(input_content)
+            else:
+                # 사용자 액션 로깅
+                log_user_action("Clean Text", f"Text length: {text_length} characters, Guideline: {self.current_guideline}")
+                
+                # 스레드에서 처리
+                self._start_processing_thread(input_content)
             
         except Exception as e:
             self._handle_processing_error(str(e))
@@ -650,17 +657,30 @@ class TextCleanerApp:
         try:
             logging.info("Updating output area")
             self.output_text.delete(1.0, tk.END)
-            self.output_text.insert(1.0, result_text)
             
-            if self.current_guideline and self.current_guideline in self.guidelines:
-                guideline = self.guidelines[self.current_guideline]
-                info_text = f"\n\n{'='*3}\nRules to apply:({self.current_guideline})\n"
-                for rule in guideline.get('rules', []):
-                    clean_rule = rule.replace('"', '')
-                    info_text += f"  • {clean_rule}\n"
-                self.output_text.insert(tk.END, info_text)
+            # 빈 텍스트 처리
+            if not result_text.strip():
+                self.output_text.insert(1.0, "입력된 텍스트가 없습니다.\n")
+                if self.current_guideline and self.current_guideline in self.guidelines:
+                    guideline = self.guidelines[self.current_guideline]
+                    info_text = f"\n{'='*3}\nRules to apply:({self.current_guideline})\n"
+                    for rule in guideline.get('rules', []):
+                        clean_rule = rule.replace('"', '')
+                        info_text += f"  • {clean_rule}\n"
+                    self.output_text.insert(tk.END, info_text)
+                self.status_var.set("빈 텍스트 - 가이드라인 정보만 표시됨")
+            else:
+                self.output_text.insert(1.0, result_text)
                 
-            self._update_status(original_lines, cleaned_lines, youtube_links_removed)
+                if self.current_guideline and self.current_guideline in self.guidelines:
+                    guideline = self.guidelines[self.current_guideline]
+                    info_text = f"\n\n{'='*3}\nRules to apply:({self.current_guideline})\n"
+                    for rule in guideline.get('rules', []):
+                        clean_rule = rule.replace('"', '')
+                        info_text += f"  • {clean_rule}\n"
+                    self.output_text.insert(tk.END, info_text)
+                    
+                self._update_status(original_lines, cleaned_lines, youtube_links_removed)
             
             # 사용자 액션 로깅
             result_length = len(result_text)
@@ -708,10 +728,9 @@ class TextCleanerApp:
         self.clean_button.config(state='normal')
 
     def _validate_input(self, text: str) -> bool:
-        """입력 검증"""
-        if not text or not text.strip():
-            messagebox.showwarning("Warning", self.text['warning_no_text'])
-            return False
+        """입력 검증 - 텍스트가 없어도 허용"""
+        # 텍스트가 없어도 정리 기능이 작동하도록 수정
+        # 빈 텍스트의 경우에도 정리 프로세스를 진행할 수 있음
         return True
 
     def _copy_to_clipboard(self) -> None:
@@ -998,13 +1017,145 @@ class TextCleanerApp:
         
         if batch_file.exists():
             cmd: str = f'start cmd /k "cd /d {project_root} && {batch_file}"'
+        elif upgrade_script.exists():
+            cmd = f'start cmd /k "cd /d {project_root} && py {upgrade_script}"'
         else:
-            cmd = f'start cmd /k "cd /d {project_root} && py {upgrade_script} --upgrade-and-restart"'
+            # 백업 방법: 직접 src/core/upgrade_manager.py 실행
+            upgrade_manager_path = project_root / "src" / "core" / "upgrade_manager.py"
+            if upgrade_manager_path.exists():
+                cmd = f'start cmd /k "cd /d {project_root} && py {upgrade_manager_path} --upgrade-and-restart"'
+            else:
+                # 최종 백업: 임시 스크립트 파일 생성하여 실행 (개선된 버전)
+                temp_script = project_root / "temp_upgrade.py"
+                script_content = f'''#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+임시 업그레이드 스크립트
+UI에서 업그레이드 매니저를 안전하게 실행하기 위한 임시 파일
+"""
+import sys
+import os
+import logging
+from pathlib import Path
+from datetime import datetime
+
+# 프로젝트 루트를 sys.path에 추가
+project_root = Path(r"{project_root}")
+sys.path.insert(0, str(project_root))
+
+# 로깅 설정
+log_dir = project_root / "logs"
+log_dir.mkdir(exist_ok=True)
+log_file = log_dir / f"temp_upgrade_{{datetime.now().strftime('%Y%m%d_%H%M%S')}}.log"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file, encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+
+print("[임시 업그레이드 스크립트] 시작...")
+logging.info("임시 업그레이드 스크립트 시작")
+
+try:
+    from src.core.upgrade_manager import UpgradeManager
+    print("[임시 업그레이드 스크립트] 업그레이드 매니저 임포트 성공")
+    logging.info("업그레이드 매니저 임포트 성공")
+    
+    manager = UpgradeManager(None)
+    print("[임시 업그레이드 스크립트] 업그레이드 매니저 인스턴스 생성 완료")
+    logging.info("업그레이드 매니저 인스턴스 생성 완료")
+    
+    result = manager.execute_upgrade(auto_upgrade=True)
+    print(f"[임시 업그레이드 스크립트] 업그레이드 실행 결과: {{result}}")
+    logging.info(f"업그레이드 실행 결과: {{result}}")
+    
+    if result:
+        print("[임시 업그레이드 스크립트] 새 프로그램 실행 시도...")
+        launch_result = manager.launch_new_program()
+        if launch_result:
+            print("[임시 업그레이드 스크립트] 새 프로그램 실행 성공")
+            logging.info("새 프로그램 실행 성공")
+        else:
+            print("[임시 업그레이드 스크립트] 새 프로그램 실행 실패")
+            logging.error("새 프로그램 실행 실패")
+    else:
+        print("[임시 업그레이드 스크립트] 업그레이드 실패")
+        logging.error("업그레이드 실패")
+        
+except Exception as e:
+    error_msg = f"업그레이드 실패: {{e}}"
+    print(f"[임시 업그레이드 스크립트] {{error_msg}}")
+    logging.error(error_msg)
+    import traceback
+    logging.error(traceback.format_exc())
+    
+finally:
+    print("[임시 업그레이드 스크립트] 종료")
+    logging.info("임시 업그레이드 스크립트 종료")
+    
+    # 임시 파일 삭제
+    try:
+        os.remove(__file__)
+        print("[임시 업그레이드 스크립트] 임시 파일 삭제 완료")
+    except Exception as e:
+        print(f"[임시 업그레이드 스크립트] 임시 파일 삭제 실패: {{e}}")
+'''
+                # 임시 스크립트 파일 생성
+                with open(temp_script, 'w', encoding='utf-8') as f:
+                    f.write(script_content)
+                
+                cmd = f'start cmd /k "cd /d {project_root} && py {temp_script}"'
             
-        subprocess.Popen(cmd, shell=True)
-        logging.info("Upgrade manager running in a new cmd window and closing current window")
-        log_user_action("Upgrade", "Upgrade manager ran (cmd window)")
-        self.root.destroy()
+        try:
+            # 업그레이드 매니저 실행
+            subprocess.Popen(cmd, shell=True)
+            logging.info("업그레이드 매니저가 새 cmd 창에서 실행되고 현재 창을 닫습니다")
+            log_user_action("Upgrade", "업그레이드 매니저 실행됨 (cmd 창)")
+            
+            # 사용자에게 메시지 표시 (자동으로 닫히도록 설정)
+            upgrade_window = messagebox.showinfo("업그레이드", "업그레이드 매니저가 새 창에서 실행됩니다.\n현재 프로그램이 종료됩니다.")
+            
+            # 1초 후 자동으로 창 닫기 및 프로그램 종료 (더 빠르게)
+            self.root.after(1000, self._auto_close_and_exit)
+            
+        except Exception as e:
+            error_msg = f"업그레이드 매니저 실행 실패: {e}"
+            logging.error(error_msg)
+            log_user_action("Upgrade", f"실행 실패: {error_msg}", False)
+            messagebox.showerror("오류", error_msg)
+
+    def _auto_close_and_exit(self) -> None:
+        """자동으로 창을 닫고 프로그램 종료"""
+        try:
+            # 모든 Toplevel 창 닫기
+            for widget in self.root.winfo_children():
+                if isinstance(widget, tk.Toplevel):
+                    widget.destroy()
+            
+            # 현재 창 종료
+            self.root.destroy()
+            
+        except Exception as e:
+            logging.warning("자동 창 닫기 실패: %s", e)
+            # 강제 종료
+            try:
+                self.root.quit()
+            except:
+                pass
+
+    def _force_close_upgrade_window(self) -> None:
+        """업그레이드 창 강제 닫기"""
+        try:
+            # 모든 Toplevel 창 닫기
+            for widget in self.root.winfo_children():
+                if isinstance(widget, tk.Toplevel):
+                    widget.destroy()
+        except Exception as e:
+            logging.warning("업그레이드 창 강제 닫기 실패: %s", e)
 
     def _handle_upgrade_error(self, error: str) -> None:
         """업그레이드 오류 처리"""
