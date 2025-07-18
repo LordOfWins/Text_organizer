@@ -142,4 +142,7 @@ restore_guidelines.bat
 # Cursor rules and documentation
 .cursor/rules/
 *.md
-guidelines_backup_*.json 
+guidelines_backup_*.json
+
+# User-specific configuration files
+guidelines.json 
