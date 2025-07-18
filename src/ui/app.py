@@ -273,10 +273,19 @@ class TextCleanerApp:
         return batches
 
     def _on_list_paste(self, event=None):
-        """리스트에 붙여넣기"""
+        """리스트에 붙여넣기 - 이미지 자동 OCR 처리 포함"""
         log_user_action("Paste into list")
         logging.info("=== 리스트 붙여넣기 시작 ===")
         
+        # 먼저 클립보드에서 이미지 확인
+        if self.ocr_processor.is_available():
+            clipboard_image = self.ocr_processor.get_clipboard_image()
+            if clipboard_image is not None:
+                logging.info("클립보드에서 이미지 감지 - OCR 처리 시작")
+                self._process_clipboard_image_ocr()
+                return "break"
+        
+        # 이미지가 없으면 기존 텍스트 처리 로직 실행
         try:
             pasted = self.root.clipboard_get()
             logging.info(f"클립보드 내용 길이: {len(pasted)} 문자")
@@ -908,6 +917,69 @@ class TextCleanerApp:
         log_user_action("OCR", f"Error: {error}", False)
         self.status_var.set(error_msg)
         messagebox.showerror("OCR Error", f"Failed to extract text from image: {error}")
+    
+    def _process_clipboard_image_ocr(self) -> None:
+        """클립보드 이미지 자동 OCR 처리"""
+        log_user_action("Auto OCR from clipboard image")
+        logging.info("=== 클립보드 이미지 자동 OCR 처리 시작 ===")
+        
+        # UI 상태 업데이트
+        self.status_var.set("클립보드 이미지에서 텍스트 추출 중...")
+        self.root.update_idletasks()
+        
+        # 별도 스레드에서 OCR 처리
+        def ocr_processing():
+            try:
+                # 클립보드 이미지에서 텍스트 추출
+                extracted_text = self.ocr_processor.process_clipboard_image()
+                
+                if extracted_text.strip():
+                    logging.info(f"OCR 추출 성공: {len(extracted_text)} 문자")
+                    logging.info(f"추출된 텍스트 미리보기: {repr(extracted_text[:200])}...")
+                    
+                    # UI 스레드에서 결과 업데이트
+                    self.root.after(0, lambda: self._update_clipboard_ocr_result(extracted_text))
+                else:
+                    logging.warning("OCR에서 텍스트를 추출할 수 없었습니다")
+                    self.root.after(0, lambda: self._handle_clipboard_ocr_no_text())
+                    
+            except Exception as e:
+                error_msg = f"클립보드 이미지 OCR 처리 실패: {e}"
+                logging.error(error_msg)
+                self.root.after(0, lambda: self._handle_ocr_error(error_msg))
+        
+        # 백그라운드 스레드에서 실행
+        ocr_thread = threading.Thread(target=ocr_processing, daemon=self.THREAD_DAEMON)
+        ocr_thread.start()
+    
+    def _update_clipboard_ocr_result(self, extracted_text: str) -> None:
+        """클립보드 OCR 결과를 입력 텍스트에 업데이트"""
+        try:
+            # 입력 텍스트 영역에 추출된 텍스트 삽입
+            self.list_text.delete(1.0, tk.END)
+            self.list_text.insert(1.0, extracted_text)
+            
+            # 숨겨진 입력 텍스트에도 동일하게 삽입
+            self.input_text.delete(1.0, tk.END)
+            self.input_text.insert(1.0, extracted_text)
+            
+            # 상태 업데이트
+            self.status_var.set(f"이미지에서 {len(extracted_text)} 문자 추출 완료")
+            
+            # 로그 기록
+            self._log_ocr_result(extracted_text)
+            
+            logging.info("클립보드 OCR 결과 입력 텍스트에 업데이트 완료")
+            
+        except Exception as e:
+            error_msg = f"OCR 결과 업데이트 실패: {e}"
+            logging.error(error_msg)
+            self._handle_ocr_error(error_msg)
+    
+    def _handle_clipboard_ocr_no_text(self) -> None:
+        """클립보드 OCR에서 텍스트를 찾을 수 없는 경우"""
+        self.status_var.set("이미지에서 텍스트를 찾을 수 없습니다")
+        messagebox.showinfo("OCR 결과", "이미지에서 텍스트를 추출할 수 없었습니다.\n다른 이미지를 시도해보세요.")
 
     def _upgrade_program(self) -> None:
         """프로그램 업그레이드"""
